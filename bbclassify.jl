@@ -69,6 +69,28 @@ function dcbinom(p, n, N, k)
     a - e * (b - 2*c + d)
 end
 
+function da_factorial(x)
+    if x > 0
+        return prod(1:x)
+    elseif x == 0
+        return 1
+    else
+        return prod(x:-1)
+    end
+end
+
+function choose(N, n)
+    return da_factorial(N) / (da_factorial(n) * da_factorial(N - n))
+end
+
+function choose_functions(N, n)
+    a = choose(N, n)
+    b = choose(N - 2, n)
+    c = choose(N - 2, n - 1)
+    d = choose(N - 2, n - 2)
+    return [a, b, c, d]
+end
+
 # Descending factorial function
 function dfac(x, r)
     x_o = copy(x)
@@ -81,7 +103,7 @@ function dfac(x, r)
             end
         end
     end
-    x
+    return x
 end
 
 # True-score distribution moment generating function
@@ -98,7 +120,21 @@ function tsm(x, n, k)
             m[i] = (a / b) * c
         end
     end
-    m
+    return m
+end
+
+function dcbinom2(p, x, N, n, k, method)
+    n = big(n)
+    N = big(N)
+    a = x[1] * (p^n) * (1 - p)^(N - n)
+    #if method != "ll"
+    b = x[2] * (p^n) * (1 - p)^(N - n)
+    c = x[3] * (p^n) * (1 - p)^(N - n)
+    d = x[4] * (p^n) * (1 - p)^(N - n)
+    e = k * p * (1 - p)
+    return a - e * (b - 2 * c + d)
+    #end
+    #return a
 end
 
 # Beta Binomial integration
@@ -109,6 +145,14 @@ function bbintegrate1(a, b, l, u, N, n, k, lower, upper, method = "ll")
         quadgk(x -> dbeta(x, a, b, l, u) * dcbinom(x, n, N, k), lower, upper)[1]
     end
 end
+# Alternate Binomial integration
+function bbintegrate1_1(a, b, l, u, c, N, n, k, lower, upper, method = "ll")
+    if method == "ll"
+        quadgk(x -> dbeta(x, a, b, l, u) * dcbinom2(x, c, n, N, k, "ll"), lower, upper)[1]
+    else
+        quadgk(x -> dbeta(x, a, b, l, u) * dcbinom2(x, c, n, N, k, "hb"), lower, upper)[1]
+    end
+end
 
 # Beta Compound-Binomial integration
 function bbintegrate2(a, b, l, u, N, n1, n2, k, lower, upper, method = "ll")
@@ -116,6 +160,14 @@ function bbintegrate2(a, b, l, u, N, n1, n2, k, lower, upper, method = "ll")
         quadgk(x -> dbeta(x, a, b, l, u) * dbinom(x, n1, N) * dbinom(x, n2, N), lower, upper)[1]
     else
         quadgk(x -> dbeta(x, a, b, l, u) * dcbinom(x, n1, N, k) * dcbinom(x, n2, N, k), lower, upper)[1]
+    end
+end
+# Alternative Beta Compound-Binomial integration
+function bbintegrate2_1(a, b, l, u, c1, c2, N, n1, n2, k, lower, upper, method = "ll")
+    if method == "ll"
+        quadgk(x -> dbeta(x, a, b, l, u) * dbinom2(x, c1, n1, N, 0, "ll") * dbinom2(x, c2, n2, N, 0, "ll"), lower, upper)[1]
+    else
+        quadgk(x -> dbeta(x, a, b, l, u) * dcbinom(x, c1, n1, N, k, "hb") * dcbinom(x, c2, n2, N, k, "hb"), lower, upper)[1]
     end
 end
 
@@ -254,6 +306,109 @@ function cac(x, reliability, minimum, maximum, cut, model = 4, lower = 0, upper 
     out
 end
 
+function cac2(x, reliability, minimum, maximum, cut, model = 4, lower = 0, upper = 1, failsafe = true, method = "ll", output = ["accuracy", "consistency"])
+    out = Dict()
+    minimum = Float64(minimum)
+    maximum = Float64(maximum)
+    cut = Float64.(cut)
+    pushfirst!(cut, minimum)
+    push!(cut, maximum)
+    truecut = Vector{Float64}(undef, size(cut)[1])
+    for i in 1:size(truecut)[1]
+        truecut[i] = (cut[i] - minimum) / (maximum - minimum)
+    end
+    if method == "ll"
+        x = Float64.(x)
+        N_not_rounded = etl(mean(x), var(x), reliability, minimum, maximum)
+        N = Int(round(N_not_rounded))
+        for i in 1:size(x)[1]       
+            x[i] = ((x[i] - minimum) / (maximum - minimum)) * N_not_rounded
+        end
+        pars = betaparameters(x, N, 0, 4)
+        if (failsafe == true && model == 4) && (pars["lower"] < 0 || pars["upper"] > 1)
+            pars = betaparameters(x, N, 0, 2, lower, upper)
+        end
+        pars["etl"] = N_not_rounded
+        pars["etl_rounded"] = N
+        pars["lords_k"] = 0
+        for i in 1:size(cut)[1]
+            cut[i] = round(truecut[i] * N)
+        end
+        cut = Int64.(cut)
+    else
+        N = Int(maximum)
+        K = k(mean(x), var(x), reliability, N)
+        pars = betaparameters(x, N, K, 4, minimum, maximum)
+        if (failsafe == true && model == 4) && (pars["lower"] < 0 || pars["upper"] > 1)
+            pars = betaparameters(x, N, K, 2, l = lower, u = upper)
+        end
+        pars["atl"] = N
+        pars["lords_k"] = K
+        cut = Int64.(cut)
+    end
+    out["Parameters"] = pars
+
+    choose_values = [choose_functions(N, i) for i in 0:N]
+
+    if "accuracy" in output
+        confmat = Array{Float64, 2}(undef, N + 1, size(cut)[1] - 1)
+        for i in 1:(size(cut)[1] - 1)
+            for j in 1:(N + 1)
+                confmat[j, i] = bbintegrate1_1(pars["alpha"], pars["beta"], pars["lower"], pars["upper"], choose_values[j], N, (j - 1), pars["lords_k"], truecut[i], truecut[i + 1], method)
+            end
+        end
+        confusionmatrix = Array{Float64, 2}(undef, size(cut)[1] - 1, size(cut)[1] - 1)
+        for i in 1:(size(cut)[1] - 1)
+            for j in 1:(size(cut)[1] - 1)
+                if i != (size(cut)[1] - 1)
+                    confusionmatrix[i, j] = sum(confmat[(cut[i] + 1):cut[i + 1], j])
+                else
+                    confusionmatrix[i, j] = sum(confmat[(cut[i] + 1):(N + 1), j])
+                end
+            end
+        end
+        out["confusion_matrix"] = confusionmatrix
+        out["overall_accuracy"] = sum(Diagonal(confusionmatrix))
+    end
+    if "consistency" in output
+        consmat = Array{Float64, 2}(undef, N + 1, N + 1)
+        for i in 1:(N + 1)
+            for j in 1:(N + 1)
+                if i <= j
+                    consmat[i, j] = bbintegrate2_1(pars["alpha"], pars["beta"], pars["lower"], pars["upper"], choose_values[i], choose_values[j], N, (i - 1), (j - 1), pars["lords_k"], 0, 1, method)
+                end
+            end
+        end
+        consmat = triu(consmat) + transpose(triu(consmat, 1))       
+        consistencymatrix = Array{Float64, 2}(undef, size(cut)[1] - 1, size(cut)[1] - 1)
+        for i in 1:(size(cut)[1] - 1)
+            for j in 1:(size(cut)[1] - 1)
+                if i == 1 && j == 1
+                    consistencymatrix[i, j] = sum(consmat[1:(cut[i + 1]), 1:(cut[j + 1])])
+                elseif i == 1 && (j != 1 && j != size(cut)[1] - 1)
+                    consistencymatrix[i, j] = sum(consmat[1:(cut[i + 1]), (cut[j] + 1):(cut[j + 1])])
+                elseif i == 1  && j == size(cut)[1] - 1
+                    consistencymatrix[i, j] = sum(consmat[1:(cut[i + 1]), (cut[j] + 1):(cut[j + 1]) + 1])
+                elseif (i != 1 && i != size(cut)[1] - 1) && j == 1
+                    consistencymatrix[i, j] = sum(consmat[(cut[i] + 1):(cut[i + 1]), 1:(cut[j + 1])])
+                elseif (i != 1 && i != size(cut)[1] - 1) && (j != 1 && j != size(cut)[1] - 1)
+                    consistencymatrix[i, j] = sum(consmat[(cut[i] + 1):(cut[i + 1]), (cut[j] + 1):(cut[j + 1])])
+                elseif (i != 1 && i != size(cut)[1] - 1) && j == size(cut)[1] - 1
+                    consistencymatrix[i, j] = sum(consmat[(cut[i] + 1):(cut[i + 1]), (cut[j] + 1):cut[j + 1] + 1])
+                elseif i == size(cut)[1] - 1 && j == 1
+                    consistencymatrix[i, j] = sum(consmat[(cut[i] + 1):(cut[i + 1] + 1), 1:(cut[j + 1])])
+                elseif i == size(cut)[1] - 1 && (j != 1 && j != size(cut)[1] - 1)
+                    consistencymatrix[i, j] = sum(consmat[(cut[i] + 1):(cut[i + 1] + 1), (cut[j] + 1):(cut[j + 1])])
+                else
+                    consistencymatrix[i, j] = sum(consmat[(cut[i] + 1):(cut[i + 1] + 1), (cut[j] + 1):(cut[j + 1]) + 1])
+                end
+            end
+        end
+        out["consistency_matrix"] = consistencymatrix
+        out["overall_consistency"] = sum(Diagonal(consistencymatrix))
+    end
+    out
+end
 
 # Simulate data
 Random.seed!(123456)
@@ -270,9 +425,5 @@ end
 sumscores = sum(rawscores, dims = 2)
 meanscores = mean(rawscores, dims = 2)
 
-# Example run with sum-scores.
-cac(sumscores, cba(rawscores), 0, 100, [50, 75], 4, 0, 1, true, "ll") #Livingston and Lewis approach
-#cac(sumscores, cba(rawdata), 0, 100, [50, 75], 4, 0, 1, true, "hb") #Hanson and Brennan approach
-
-# Example run with mean-scores (only works for Livingston and Lewis approach).
-cac(meanscores, cba(rawscores), 0, 1, [.4, .6], 4, 0, 1, true, "ll") #
+@time cac(sumscores, cba(rawscores), 0, 100, [50, 75], 4, 0, 1, true, "ll")
+@time cac2(sumscores, cba(rawscores), 0, 100, [50, 75], 4, 0, 1, true, "ll")
